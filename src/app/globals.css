@@ -1,0 +1,59 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: var(--font-sans), 'DM Sans', system-ui, sans-serif;
+  background-color: var(--primitives-colors-neutral-color-palete-nuetral99);
+  color: var(--primitives-colors-neutral-color-palete-nuetral10);
+}
+
+/* --- Token-backed surface helpers --- */
+.bg-surface {
+  background-color: var(--primitives-colors-neutral-color-palete-nuetral99);
+}
+.bg-surface-elevated {
+  background-color: var(--primitives-colors-neutral-color-palete-nuetral100);
+}
+.text-on-surface {
+  color: var(--primitives-colors-neutral-color-palete-nuetral10);
+}
+.text-on-surface-muted {
+  color: var(--primitives-colors-neutral-color-palete-nuetral50);
+}
+.bg-primary {
+  background-color: var(--colors-roles-primary);
+}
+.text-on-primary {
+  color: var(--colors-roles-on-primary);
+}
+.bg-primary-container {
+  background-color: var(--colors-roles-primary-container);
+}
+.text-on-primary-container {
+  color: var(--colors-roles-on-primary-container);
+}
+.bg-secondary {
+  background-color: var(--colors-roles-secondary);
+}
+.text-on-secondary {
+  color: var(--colors-roles-on-secondary);
+}
+.bg-secondary-container {
+  background-color: var(--colors-roles-secondary-container);
+}
+.text-on-secondary-container {
+  color: var(--colors-roles-on-secondary-container);
+}
+.bg-error-container {
+  background-color: var(--colors-roles-error-container);
+}
+.text-on-error-container {
+  color: var(--colors-roles-on-error-container);
+}
+.shadow-soft {
+  box-shadow: var(--effect-soft-shadow);
+}
+.shadow-medium {
+  box-shadow: var(--effect-medium-shadow);
+}

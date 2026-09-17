@@ -1,0 +1,32 @@
+# dependencies
+/node_modules
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# runtime data
+storage/
+*.db
+*.db-journal
+
+# secrets
+.env
+.env.local
+.env*.local
+
+# logs
+*.log
+npm-debug.log*
+
+# typescript incremental builds
+*.tsbuildinfo
+
+# misc
+.DS_Store
+*.pem
+.vscode/
+.idea/

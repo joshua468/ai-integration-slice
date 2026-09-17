@@ -1,0 +1,105 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Job {
+  id               String      @id @default(cuid())
+  documentType     String      @default("generic") // "report" | "invoice" | "contract" | "notes" | "spec" | "generic"
+  fileName         String
+  fileSize         Int
+  mimeType         String
+  storageKey       String?     // key of the uploaded file in local object storage; never the file bytes themselves
+  attempts         Int         @default(0) // how many times this unit of work has been executed
+  filePath         String?
+  filePreviewUrl   String?
+  sourceText       String?
+  status           String      @default("QUEUED") // "QUEUED" | "PREPROCESSING" | "INFERENCE" | "FORMATTING" | "COMPILING_PDF" | "COMPLETED" | "FAILED"
+  progress         Int         @default(0)
+  currentStage     String      @default("Queued")
+  modelProvider    String      @default("simulation") // "gemini" | "openai" | "simulation"
+  modelName        String      @default("gemini-3.6-flash")
+  templateStyle    String      @default("executive") // "executive" | "corporate" | "minimal" | "modern"
+  
+  // AI Output Payload
+  title            String?
+  subtitle         String?
+  summary          String?
+  author           String?
+  date             String?
+  structuredData   String?     // Complete JSON string of sections, tables, action items, tags
+  rawAiResponse    String?
+  confidenceScore  Float?      @default(0.95)
+  
+  // PDF & Output
+  pdfDataUri       String?     // Pre-rendered base64 data URI
+  
+  // Metrics
+  promptTokens     Int?        @default(0)
+  completionTokens Int?        @default(0)
+  totalTokens      Int?        @default(0)
+  estimatedCost    Float?      @default(0.0)
+  processingTimeMs Int?        @default(0)
+  errorMessage     String?
+  verifiedByUser   Boolean     @default(false)
+  
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+  logs             JobLog[]
+  followUps        FollowUp[]
+
+  @@index([status])
+  @@index([documentType])
+  @@index([createdAt])
+}
+
+model JobLog {
+  id        String   @id @default(cuid())
+  jobId     String
+  job       Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  stage     String
+  message   String
+  level     String   @default("info") // "info" | "warn" | "error" | "success"
+  timestamp DateTime @default(now())
+
+  @@index([jobId])
+}
+
+model FollowUp {
+  id               String   @id @default(cuid())
+  jobId            String
+  job              Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  action           String   @default("summarise") // the second AI role
+  status           String   @default("PENDING") // "PENDING" | "PROCESSING" | "DONE" | "FAILED"
+  attempts         Int      @default(0)
+  errorMessage     String?
+  output           String?  // JSON string of the validated follow-up output
+  rawAiResponse    String?
+  modelProvider    String   @default("gemini")
+  modelName        String   @default("gemini-3.6-flash")
+  promptTokens     Int?     @default(0)
+  completionTokens Int?     @default(0)
+  totalTokens      Int?     @default(0)
+  estimatedCost    Float?   @default(0.0)
+  processingTimeMs Int?     @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([jobId])
+  @@index([status])
+}
+
+model RateLimitEntry {
+  id     String  @id @default(cuid())
+  kind   String // "upload" | "follow-up"
+  key    String // client IP (or "local-dev")
+  bucket Int    // Math.floor(now / windowMs) — the fixed window
+  count  Int    @default(0)
+
+  @@unique([kind, key, bucket])
+  @@index([kind, bucket])
+}
