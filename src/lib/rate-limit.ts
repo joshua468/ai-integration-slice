@@ -32,6 +32,18 @@ function isIpLiteral(value: string): boolean {
 }
 
 /**
+ * Collapse the IPv4-mapped IPv6 form to its plain IPv4 equivalent.
+ *
+ * `::ffff:1.2.3.4` and `1.2.3.4` are the same host, but as raw strings they are
+ * different keys, so a caller behind a trusted proxy could alternate the notation
+ * and hold two independent quotas. Normalising here keeps one host on one bucket.
+ */
+function canonicalKey(ip: string): string {
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(ip);
+  return mapped ? mapped[1] : ip.toLowerCase();
+}
+
+/**
  * Resolve the identity the rate limit is keyed on.
  *
  * `X-Forwarded-For` and `X-Real-IP` are CLIENT-SUPPLIED headers. The previous
@@ -57,10 +69,10 @@ export function getClientIp(req: NextRequest): string {
       // trusted proxy appended.
       const chain = fwd.split(',').map((s) => s.trim()).filter(Boolean);
       const candidate = chain[chain.length - hops];
-      if (candidate && isIpLiteral(candidate)) return candidate;
+      if (candidate && isIpLiteral(candidate)) return canonicalKey(candidate);
     }
     const realIp = req.headers.get('x-real-ip');
-    if (realIp && isIpLiteral(realIp.trim())) return realIp.trim();
+    if (realIp && isIpLiteral(realIp.trim())) return canonicalKey(realIp.trim());
   }
 
   return 'unidentified';

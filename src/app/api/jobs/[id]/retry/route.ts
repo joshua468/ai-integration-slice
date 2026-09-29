@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { enqueueJob } from '@/lib/queue/worker';
+import { config } from '@/lib/config';
+import { rateLimitResponse } from '@/lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
 
@@ -9,6 +11,12 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    // Retry re-runs the full analysis pipeline, so it is metered on the same
+    // budget as an upload. Without this the endpoint was the cheapest way to
+    // trigger a paid model call: a job id in a loop, no upload required.
+    const tooMany = await rateLimitResponse(req, config.rateLimit.retry.max, config.rateLimit.retry.windowMs, 'retry');
+    if (tooMany) return tooMany;
+
     const { id } = await params;
 
     const job = await prisma.job.findUnique({
