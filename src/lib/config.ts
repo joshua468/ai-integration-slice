@@ -62,6 +62,17 @@ export const config = {
     followUp: { windowMs: 60_000, max: 10 },
     // 8 — files per upload request, an extra bound on top of the request rate limit.
     maxFilesPerRequest: 8,
+
+    /**
+     * How many trusted reverse proxies sit in front of this process.
+     *
+     * `X-Forwarded-For` is a client-supplied header, so it can only be used when
+     * we know how many proxies append to it. Set 1 for a single-proxy deploy
+     * (Render, Railway, Fly, Vercel, nginx). Set 2 only for a two-hop chain we
+     * control, e.g. CDN -> nginx -> app. Leave at 0 for direct/local access —
+     * forwarded headers are then ignored and every request shares one bucket.
+     */
+    trustedProxyHops: 0,
   },
 
   /** Upload accept policy enforced on both client and server. */
