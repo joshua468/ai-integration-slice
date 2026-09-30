@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import mammoth from 'mammoth';
 import { jsPDF } from 'jspdf';
-import { inflateSync } from 'zlib';
+import { extractText, getDocumentProxy } from 'unpdf';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -9,53 +9,19 @@ export const dynamic = 'force-dynamic';
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
 // ---------------------------------------------------------------------------
-// PDF text extraction (minimal parser for simple PDFs)
+// PDF text extraction
+//
+// Uses unpdf (pdf.js) rather than a hand-rolled tokenizer. A regex scanner
+// cannot read hex strings `<0048...> Tj`, which is how Word, InDesign and
+// most professional producers emit text, nor CID/Type0 font encodings,
+// `Tm` text matrices, or object streams. Those cases previously produced
+// zero text and a 422.
 // ---------------------------------------------------------------------------
-function decodePdfString(s: string): string {
-  return s
-    .replace(/\\([0-7]{1,3})/g, (_, oct) => String.fromCharCode(parseInt(oct, 8)))
-    .replace(/\\n/g, '\n')
-    .replace(/\\r/g, '')
-    .replace(/\\t/g, '\t')
-    .replace(/\\(.)/g, '$1');
-}
-
-function extractPdfText(buffer: Buffer): string {
-  const src = buffer.toString('latin1');
-  const out: string[] = [];
-  const streamRe = /stream\r?\n([\s\S]*?)\r?\n?endstream/g;
-  let m: RegExpExecArray | null;
-
-  while ((m = streamRe.exec(src)) !== null) {
-    let data: Buffer;
-    try {
-      data = inflateSync(Buffer.from(m[1], 'latin1'));
-    } catch {
-      data = Buffer.from(m[1], 'latin1');
-    }
-
-    const content = data.toString('latin1');
-    // Captures strings shown via Tj or as TJ arrays, and text-move markers.
-    const tokenRe =
-      /\(((?:[^()\\]|\\.)*)\)\s*Tj|\[([\s\S]*?)\]\s*TJ|T\*|(-?[\d.]+) (-?[\d.]+) [Td-]/g;
-    let t: RegExpExecArray | null;
-
-    while ((t = tokenRe.exec(content)) !== null) {
-      if (t[1] !== undefined) {
-        out.push(decodePdfString(t[1]));
-      } else if (t[2] !== undefined) {
-        const strs = [
-          ...t[2].matchAll(/\(((?:[^()\\]|\\.)*)\)/g),
-        ].map((x) => decodePdfString(x[1]));
-        out.push(strs.join(' '));
-      } else {
-        out.push('\n');
-      }
-    }
-  }
-
-  return out
-    .join('')
+async function extractPdfText(buffer: Buffer): Promise<string> {
+  const doc = await getDocumentProxy(new Uint8Array(buffer));
+  const { text } = await extractText(doc, { mergePages: true });
+  return (text || '')
+    .replace(/\u0000/g, '')
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
@@ -271,10 +237,13 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      const text = extractPdfText(buffer);
+      const text = await extractPdfText(buffer);
       if (!text) {
         return NextResponse.json(
-          { error: 'Could not extract readable text from this PDF.' },
+          {
+            error:
+              'Could not extract readable text from this PDF. It may be a scanned image, or the text may be stored as vector outlines. OCR is required for these files.',
+          },
           { status: 422 }
         );
       }

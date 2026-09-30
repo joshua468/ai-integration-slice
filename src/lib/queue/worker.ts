@@ -6,6 +6,7 @@ import { generateDocumentPdf } from '../pdf/generator';
 import { config } from '../config';
 import { readUpload, uploadFilePath } from '../storage';
 import mammoth from 'mammoth';
+import { extractText, getDocumentProxy } from 'unpdf';
 
 // Global Event Bus for live SSE streams
 type Listener = (event: QueueProgressEvent) => void;
@@ -146,6 +147,23 @@ export async function extractTextFromInput(
 
   if (mimeType === 'text/plain' || mimeType === 'text/markdown' || mimeType === 'application/json') {
     return buffer.toString('utf-8');
+  }
+
+  if (mimeType === 'application/pdf' || mimeType === 'application/x-pdf') {
+    // Previously fell through to buffer.toString('utf-8'), which turned every
+    // uploaded PDF into binary garbage and fed it to the model.
+    try {
+      const doc = await getDocumentProxy(new Uint8Array(buffer));
+      const { text } = await extractText(doc, { mergePages: true });
+      const extracted = (text || '').replace(/\u0000/g, '').trim();
+      if (extracted) {
+        return extracted;
+      }
+      return 'This PDF contains no extractable text layer. It is most likely a scanned image and requires OCR, which this pipeline does not perform.';
+    } catch (e: any) {
+      console.error('PDF text extraction failed:', e?.message);
+      return `PDF text extraction failed: ${e?.message || 'unknown error'}. The file may be corrupt or password-protected.`;
+    }
   }
 
   if (
