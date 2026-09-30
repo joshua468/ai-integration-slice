@@ -110,14 +110,40 @@ async function consumeQuota(kind: string, key: string, bucket: number, limit: nu
 
   // Either the row does not exist yet, or it is already at the cap. Creating it
   // is safe under concurrency: the unique constraint means exactly one caller
-  // wins, and every loser correctly falls through to "refused".
+  // wins the create.
   try {
     await prisma.rateLimitEntry.create({ data: { kind, key, bucket, count: 1 } });
     return 1;
   } catch (err: any) {
-    // P2002 = unique constraint violation = we lost the create race, which
-    // means another caller already created the row for this bucket.
-    if (err?.code === 'P2002') return 0;
+    // P2002 = unique constraint violation = we lost the create race, which means
+    // another caller already created the row for this bucket.
+    //
+    // Losing that race says the row NOW EXISTS -- it does not say the bucket is
+    // full. Returning 0 here refused a caller who still had quota: on a fresh
+    // bucket the winner creates the row with count = 1, so with limit = 15 the
+    // loser's very first request of the window was rejected with 14 slots free.
+    //
+    // The row is guaranteed to exist at this point, so retry the same
+    // conditional increment and let the database arbitrate again. If the bucket
+    // really is at the cap, `count: { lt: limit }` matches nothing and we
+    // correctly return 0 (refused). This costs one extra query, and only in the
+    // narrow race window of the first request per (kind, key, bucket).
+    if (err?.code === 'P2002') {
+      const retry = await prisma.rateLimitEntry.updateMany({
+        where: { kind, key, bucket, count: { lt: limit } },
+        data: { count: { increment: 1 } },
+      });
+
+      if (retry.count > 0) {
+        const row = await prisma.rateLimitEntry.findUnique({
+          where: { kind_key_bucket: { kind, key, bucket } },
+          select: { count: true },
+        });
+        return row?.count ?? 1;
+      }
+
+      return 0;
+    }
     throw err;
   }
 }
