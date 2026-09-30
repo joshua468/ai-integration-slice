@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from './prisma';
+import { config } from './config';
 
 /**
  * Fixed-window rate limiter keyed by (kind, client IP, window bucket), stored in
@@ -17,10 +18,134 @@ import { prisma } from './prisma';
  */
 
 /** Opportunistic cleanup keeps bookkeeping tidy (single process, SQLite). */
+/** True when the value is a syntactically valid IPv4 or IPv6 literal. */
+function isIpLiteral(value: string): boolean {
+  if (!value || value.length > 45) return false;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(value);
+  if (v4) {
+    return v4.slice(1).every((oct) => {
+      const n = Number(oct);
+      return Number.isInteger(n) && n >= 0 && n <= 255;
+    });
+  }
+  return value.includes(':') && /^[0-9a-fA-F:.]+$/.test(value);
+}
+
+/**
+ * Collapse the IPv4-mapped IPv6 form to its plain IPv4 equivalent.
+ *
+ * `::ffff:1.2.3.4` and `1.2.3.4` are the same host, but as raw strings they are
+ * different keys, so a caller behind a trusted proxy could alternate the notation
+ * and hold two independent quotas. Normalising here keeps one host on one bucket.
+ */
+function canonicalKey(ip: string): string {
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(ip);
+  return mapped ? mapped[1] : ip.toLowerCase();
+}
+
+/**
+ * Resolve the identity the rate limit is keyed on.
+ *
+ * `X-Forwarded-For` and `X-Real-IP` are CLIENT-SUPPLIED headers. The previous
+ * version read `x-forwarded-for` unconditionally and took the first entry, which
+ * is the entry furthest from us and therefore entirely under the caller's
+ * control. Anyone could send a fresh header value per request and never hit the
+ * limit, so the limiter protected nothing on an endpoint that spends money.
+ *
+ * Forwarded headers are only usable when this process sits behind a known number
+ * of proxies that WE control. With `trustedProxyHops: 0` we refuse to read them
+ * at all and fall back to one shared bucket. That is deliberately fail-closed:
+ * over-limiting real users is a recoverable failure mode, an unmetered
+ * paid-model endpoint is not.
+ */
 export function getClientIp(req: NextRequest): string {
-  const fwd = req.headers.get('x-forwarded-for');
-  if (fwd) return fwd.split(',')[0].trim();
-  return req.headers.get('x-real-ip') || 'local-dev';
+  const hops = config.rateLimit.trustedProxyHops;
+
+  if (hops > 0) {
+    const fwd = req.headers.get('x-forwarded-for');
+    if (fwd) {
+      // The left-most entry is the original client and is attacker-controlled.
+      // Walk right, past every proxy we control, to the entry our outermost
+      // trusted proxy appended.
+      const chain = fwd.split(',').map((s) => s.trim()).filter(Boolean);
+      const candidate = chain[chain.length - hops];
+      if (candidate && isIpLiteral(candidate)) return canonicalKey(candidate);
+    }
+    const realIp = req.headers.get('x-real-ip');
+    if (realIp && isIpLiteral(realIp.trim())) return canonicalKey(realIp.trim());
+  }
+
+  return 'unidentified';
+}
+
+/**
+ * Atomically consume one unit of quota for (kind, key, bucket).
+ *
+ * The previous implementation did findUnique, compared in JavaScript, then
+ * wrote. That is a read-then-write race on an endpoint that costs money per call:
+ * two concurrent requests can both read `count = 14`, both observe `14 < 15`, and
+ * both be admitted — 16 requests through a limit of 15. The `create` branch had
+ * a matching failure: concurrent first-requests collide on the unique constraint
+ * and surface as a 500 instead of a clean decision.
+ *
+ * `updateMany` with `count: { lt: limit }` is a single conditional UPDATE, so the
+ * database decides the winner and at most `limit` rows can ever be incremented
+ * per window.
+ *
+ * Returns the post-increment count, or 0 when the caller was refused.
+ */
+async function consumeQuota(kind: string, key: string, bucket: number, limit: number): Promise<number> {
+  const updated = await prisma.rateLimitEntry.updateMany({
+    where: { kind, key, bucket, count: { lt: limit } },
+    data: { count: { increment: 1 } },
+  });
+
+  if (updated.count > 0) {
+    const row = await prisma.rateLimitEntry.findUnique({
+      where: { kind_key_bucket: { kind, key, bucket } },
+      select: { count: true },
+    });
+    return row?.count ?? 1;
+  }
+
+  // Either the row does not exist yet, or it is already at the cap. Creating it
+  // is safe under concurrency: the unique constraint means exactly one caller
+  // wins the create.
+  try {
+    await prisma.rateLimitEntry.create({ data: { kind, key, bucket, count: 1 } });
+    return 1;
+  } catch (err: any) {
+    // P2002 = unique constraint violation = we lost the create race, which means
+    // another caller already created the row for this bucket.
+    //
+    // Losing that race says the row NOW EXISTS -- it does not say the bucket is
+    // full. Returning 0 here refused a caller who still had quota: on a fresh
+    // bucket the winner creates the row with count = 1, so with limit = 15 the
+    // loser's very first request of the window was rejected with 14 slots free.
+    //
+    // The row is guaranteed to exist at this point, so retry the same
+    // conditional increment and let the database arbitrate again. If the bucket
+    // really is at the cap, `count: { lt: limit }` matches nothing and we
+    // correctly return 0 (refused). This costs one extra query, and only in the
+    // narrow race window of the first request per (kind, key, bucket).
+    if (err?.code === 'P2002') {
+      const retry = await prisma.rateLimitEntry.updateMany({
+        where: { kind, key, bucket, count: { lt: limit } },
+        data: { count: { increment: 1 } },
+      });
+
+      if (retry.count > 0) {
+        const row = await prisma.rateLimitEntry.findUnique({
+          where: { kind_key_bucket: { kind, key, bucket } },
+          select: { count: true },
+        });
+        return row?.count ?? 1;
+      }
+
+      return 0;
+    }
+    throw err;
+  }
 }
 
 /** Helper for Next route handlers: returns a 429 NextResponse when exceeded. */
@@ -34,12 +159,9 @@ export async function rateLimitResponse(
   const now = Date.now();
   const bucket = Math.floor(now / windowMs);
 
-  const current = await prisma.rateLimitEntry.findUnique({
-    where: { kind_key_bucket: { kind: label, key, bucket } },
-  });
-  const count = current?.count ?? 0;
+  const count = await consumeQuota(label, key, bucket, limit);
 
-  if (count >= limit) {
+  if (count === 0) {
     return NextResponse.json(
       {
         error: 'Too many requests',
@@ -50,19 +172,10 @@ export async function rateLimitResponse(
         status: 429,
         headers: {
           'Retry-After': String(Math.ceil(((bucket + 1) * windowMs - now) / 1000)),
-          'X-RateLimit-Remaining': String(Math.max(0, limit - count)),
+          'X-RateLimit-Remaining': '0',
         },
       }
     );
-  }
-
-  if (count === 0) {
-    await prisma.rateLimitEntry.create({ data: { kind: label, key, bucket, count: 1 } });
-  } else {
-    await prisma.rateLimitEntry.update({
-      where: { id: current!.id },
-      data: { count: { increment: 1 } },
-    });
   }
 
   return null;

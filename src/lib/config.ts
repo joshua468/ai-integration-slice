@@ -60,8 +60,30 @@ export const config = {
     upload: { windowMs: 60_000, max: 15 },
     // 10 follow-up requests / 60s per IP — the follow-up endpoint also runs a model call, so it has its own tighter cap.
     followUp: { windowMs: 60_000, max: 10 },
+    // 15 retry requests / 60s per IP — retry re-runs the same full analysis pipeline as an
+    // upload, so it costs the same per call and carries the same cap.
+    retry: { windowMs: 60_000, max: 15 },
     // 8 — files per upload request, an extra bound on top of the request rate limit.
     maxFilesPerRequest: 8,
+
+    /**
+     * How many trusted reverse proxies sit in front of this process.
+     *
+     * `X-Forwarded-For` is a client-supplied header, so it can only be used when
+     * we know how many proxies append to it. Set `TRUSTED_PROXY_HOPS=1` for a
+     * single-proxy deploy (Render, Railway, Fly, Vercel, nginx), and 2 only for a
+     * two-hop chain we control, e.g. CDN -> nginx -> app. Leave it unset or 0 for
+     * direct/local access — forwarded headers are then ignored and every request
+     * shares one bucket.
+     *
+     * Read from the environment rather than pinned to a constant because this is
+     * the one rate-limit value that must differ per deployment. As a constant it
+     * silently collapsed every user into a single global bucket on the first
+     * proxied deploy, which presents as a rate-limit bug rather than a config
+     * mistake. Fail-closed at 0 is still the right default: over-limiting real
+     * users is recoverable, an unmetered paid-model endpoint is not.
+     */
+    trustedProxyHops: Math.max(0, Number(process.env.TRUSTED_PROXY_HOPS) || 0),
   },
 
   /** Upload accept policy enforced on both client and server. */
